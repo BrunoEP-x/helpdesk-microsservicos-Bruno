@@ -50,6 +50,9 @@ services:
 
   redis:
     image: redis:7.4-alpine
+    # roda direto como o usuário "redis" da imagem: com cap_drop ALL, o entrypoint
+    # oficial não consegue trocar de root para redis sozinho
+    user: redis
     command: ["redis-server", "--appendonly", "yes", "--save", ""]
     volumes: [fila:/data]
     networks: [interna]
