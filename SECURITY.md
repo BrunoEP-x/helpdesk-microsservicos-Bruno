@@ -1,36 +1,39 @@
 # Segurança
 
-Este projeto é didático, mas segue práticas de segurança reais. Esta página
-explica o que já está protegido e o que fica como responsabilidade de quem
-for colocar o sistema em produção.
+O HelpDesk Pro mantém (e amplia) todas as proteções do monólito original, agora em cada microsserviço.
 
 ## O que está protegido
 
 | Risco | Proteção |
 |---|---|
-| Acesso sem login | Todas as rotas, exceto `/auth/login`, `/saude` e a tela, exigem token JWT (`Authorization: Bearer ...`). |
-| Senhas vazadas do banco | Senhas guardadas só como hash **scrypt** com sal aleatório. A senha nunca é salva nem devolvida pela API. |
-| Adivinhar senhas | Bloqueio temporário após 5 tentativas erradas (por e-mail e endereço). Mensagem igual para e-mail inexistente e senha errada. |
-| Token falsificado | Token assinado (HS256) com segredo do servidor, com validade, emissor e algoritmo fixos (tokens `alg: none` são recusados). |
-| Ver ou mexer no que não é seu | Permissões por perfil: o solicitante só vê os próprios chamados e notificações; só técnicos e administradores atribuem e resolvem; só administradores criam usuários. |
-| Agir em nome de outra pessoa | O solicitante e o autor do comentário vêm do token, não do corpo da requisição. Campos extras são recusados. |
-| Descobrir o que existe | Chamado de outra pessoa responde "não encontrado" (404), sem revelar que existe. A lista de usuários não mostra e-mails. |
-| XSS na tela | Todo texto vindo da API é escapado antes de entrar no HTML; não há scripts embutidos na página; política CSP só permite scripts do próprio servidor. |
-| Clickjacking e outros | Cabeçalhos `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`. |
-| Dados enormes | Limites de tamanho em todos os campos e corpo da requisição limitado a 64 KB. |
-| SQL injection | Acesso ao banco só pelo SQLAlchemy, com parâmetros (sem SQL montado com texto). |
-| Erros que vazam detalhes | Erros de banco respondem com mensagem genérica. |
-| Dependências vulneráveis | Versões fixas, `pip-audit` no GitHub Actions a cada envio e Dependabot semanal. |
-| Contêiner | Roda como usuário sem privilégios, sistema de arquivos somente leitura, sem capacidades extras, porta exposta só em `127.0.0.1`. |
-| Segredos no código | Segredos só por variável de ambiente (`.env`, fora do Git). |
+| Acesso sem login | **Todo serviço confere o token** (JWT HS256, emissor, validade e algoritmo fixos; `alg: none` recusado). Só `/auth/login`, `/saude` e a tela são públicos. |
+| Acesso direto aos serviços | **Só o gateway publica porta** (`127.0.0.1:8000`). Serviços, bancos e Redis ficam numa rede Docker interna, sem portas publicadas e sem saída para a internet. |
+| Segredo no código | O segredo do JWT vem do `.env` ou de um volume gerado na primeira subida (somente leitura para os serviços). Nunca está no código ou na imagem. |
+| Chamada entre serviços sem identidade | O token do usuário é **repassado** (`Authorization`) em toda chamada HTTP entre serviços; o serviço chamado aplica as próprias permissões. Quando não há usuário (consumo de eventos), o serviço usa um **token de serviço** de 5 minutos, aceito só nas rotas que o permitem. |
+| Senhas vazadas do banco | Hash **scrypt** com sal aleatório; a senha nunca é salva nem devolvida. Regras de senha forte. |
+| Adivinhar senhas | Bloqueio temporário após 5 erros (por e-mail e IP real, repassado pelo gateway); contagem no Redis, com reserva em memória. Mesma mensagem e mesmo tempo para e-mail inexistente e senha errada. |
+| Ver ou mexer no que não é seu | Permissões por perfil em cada serviço: solicitante só vê os próprios chamados, histórico e avisos; só a equipe atribui, resolve e ajusta prioridade; só admin gerencia usuários, SLA e base do assistente; notas internas escondidas do solicitante. |
+| Agir em nome de outra pessoa | Solicitante, autor de comentário e avaliador vêm do token, nunca do corpo. Campos extras são recusados (422). |
+| Descobrir o que existe | Chamado alheio responde 404. Lista de usuários sem e-mail; e-mail só para admin e serviços. |
+| Usuário desligado | Admin desativa: login bloqueado e a tela perde o acesso na hora (o token restante expira em até `TOKEN_MINUTOS`). O sistema impede remover o último administrador. |
+| XSS na tela | Todo texto da API passa por `esc()`; sem scripts ou estilos embutidos, sem `eval`; CSP só permite arquivos do próprio servidor (teste automatizado confere). |
+| Injeção de fórmulas no CSV | Células que começam com `=`, `+`, `-`, `@` são prefixadas com apóstrofo. |
+| Clickjacking e afins | `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, `Cross-Origin-Opener-Policy`, `Cache-Control: no-store` em respostas autenticadas. |
+| Dados enormes | Limites em todos os campos e corpo limitado a 64 KB (no gateway e em cada serviço). |
+| SQL injection | Acesso ao banco só pelo SQLAlchemy, com parâmetros. |
+| Erros que vazam detalhes | Tratamento centralizado: erros de banco e erros inesperados respondem com mensagem genérica; detalhes só no log. |
+| Rastreabilidade | Logs em JSON com o `X-Request-ID` criado no gateway e repassado a todos os serviços; histórico de auditoria imutável nos chamados. |
+| Contêineres | Usuário sem privilégios (uid 10001), sistema de arquivos somente leitura, `cap_drop: ALL`, `no-new-privileges`. |
+| Dependências vulneráveis | Versões fixas, `pip-audit` por serviço no GitHub Actions e Dependabot semanal (pip, Docker e Actions). |
 
 ## Antes de usar em produção
 
-- Defina `JWT_SEGREDO` com pelo menos 32 caracteres aleatórios.
-- Rode com `DADOS_EXEMPLO=0` (os usuários de exemplo têm senha conhecida) e `DOCS=0`.
-- Coloque o sistema atrás de HTTPS (por exemplo, um proxy reverso com certificado).
-- Troque o SQLite por um banco gerenciado (PostgreSQL) com backup.
-- O limite de tentativas de login fica em memória: com várias instâncias, use um armazenamento compartilhado (Redis).
+- Defina `JWT_SEGREDO` (≥ 32 caracteres aleatórios) num cofre de segredos, ou mantenha o volume `segredos` protegido.
+- Rode com `DADOS_EXEMPLO=0` (as contas de exemplo têm senha conhecida), crie o admin com `ADMIN_EMAIL`/`ADMIN_SENHA` e use `DOCS=0`.
+- Coloque o gateway atrás de HTTPS (proxy reverso com certificado).
+- Troque o SQLite por PostgreSQL gerenciado (um banco por serviço) com backup.
+- Proteja o Redis com senha/ACL se ele sair da rede interna.
+- Para revogar tokens antes de expirarem, adicione uma lista de revogação no Redis consultada por todos os serviços.
 
 ## Como relatar um problema
 
