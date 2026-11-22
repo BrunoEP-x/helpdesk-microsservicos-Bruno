@@ -1,5 +1,5 @@
 # Contexto de build: raiz do repositório (para copiar a biblioteca comum)
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 RUN useradd --create-home --uid 10001 helpdesk
 
