@@ -8,7 +8,6 @@ import logging
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy.exc import IntegrityError
 
 log = logging.getLogger("helpdesk.erros")
 
@@ -48,10 +47,15 @@ def registrar_tratadores(app: FastAPI) -> None:
             log.warning("falha de dependência em %s %s: %s", request.method, request.url.path, erro)
         return JSONResponse(status_code=erro.status_code, content={"detail": str(erro)})
 
-    @app.exception_handler(IntegrityError)
-    async def tratar_conflito(request: Request, erro: IntegrityError):
-        # Não expõe detalhes do banco na resposta
-        return JSONResponse(status_code=409, content={"detail": "O registro conflita com outro já existente."})
+    try:  # o gateway não tem banco nem SQLAlchemy
+        from sqlalchemy.exc import IntegrityError
+    except ImportError:
+        IntegrityError = None
+    if IntegrityError is not None:
+        @app.exception_handler(IntegrityError)
+        async def tratar_conflito(request: Request, erro):
+            # Não expõe detalhes do banco na resposta
+            return JSONResponse(status_code=409, content={"detail": "O registro conflita com outro já existente."})
 
     @app.exception_handler(Exception)
     async def tratar_inesperado(request: Request, erro: Exception):
