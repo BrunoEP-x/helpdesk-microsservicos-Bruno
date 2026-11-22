@@ -1,22 +1,132 @@
+# HelpDesk Pro em microsserviços.
+#   docker compose up --build      -> sobe tudo (bancos, fila, serviços e gateway)
+# Só o gateway publica porta (127.0.0.1:8000). Serviços, bancos e Redis ficam na rede interna.
+
+x-seguranca: &seguranca
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  restart: unless-stopped
+
+x-servico: &servico
+  <<: *seguranca
+  env_file:
+    - path: .env
+      required: false
+  networks: [interna]
+  depends_on:
+    segredos:
+      condition: service_completed_successfully
+
+x-saude: &saude
+  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/saude', timeout=2)"]
+  interval: 10s
+  timeout: 3s
+  retries: 5
+  start_period: 10s
+
+x-ambiente: &ambiente
+  JWT_SEGREDO_ARQUIVO: /segredos/jwt        # usado se JWT_SEGREDO não estiver no .env
+  DADOS_EXEMPLO: ${DADOS_EXEMPLO:-1}
+  SENHA_EXEMPLO: ${SENHA_EXEMPLO:-Helpdesk2026}
+  USUARIOS_URL: http://usuarios:8000
+  INVENTARIO_URL: http://inventario:8000
+  TIMEOUT_HTTP: ${TIMEOUT_HTTP:-3}
+
 services:
-  helpdesk:
-    build: .
-    ports:
-      - "127.0.0.1:8000:8000"   # só acessível pelo próprio computador
-    env_file:
-      - path: .env
-        required: false
+  # Gera um segredo JWT aleatório na primeira vez (fica num volume, nunca no código).
+  # Se JWT_SEGREDO estiver definido no .env, ele tem prioridade.
+  segredos:
+    image: python:3.12-slim
+    command: >
+      python -c "import os, secrets, pathlib;
+      p = pathlib.Path('/segredos/jwt');
+      p.exists() or p.write_text(secrets.token_urlsafe(48));
+      os.chown(p, 10001, 10001); os.chmod(p, 0o400); print('segredo JWT pronto')"
+    volumes: [segredos:/segredos]
+    network_mode: none
+    restart: "no"
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", ""]
+    volumes: [fila:/data]
+    networks: [interna]
+    <<: *seguranca
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  usuarios:
+    <<: *servico
+    build: { context: ., dockerfile: servicos/usuarios/Dockerfile }
     environment:
-      DADOS_EXEMPLO: ${DADOS_EXEMPLO:-1}
-    volumes:
-      - dados:/dados
-    read_only: true
-    tmpfs:
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
+      <<: *ambiente
+      REDIS_URL: redis://redis:6379/1          # limite de tentativas de login compartilhado
+    volumes: [banco-usuarios:/dados, segredos:/segredos:ro]
+    healthcheck: *saude
+
+  inventario:
+    <<: *servico
+    build: { context: ., dockerfile: servicos/inventario/Dockerfile }
+    environment: *ambiente
+    volumes: [banco-inventario:/dados, segredos:/segredos:ro]
+    healthcheck: *saude
+
+  chamados:
+    <<: *servico
+    build: { context: ., dockerfile: servicos/chamados/Dockerfile }
+    environment:
+      <<: *ambiente
+      REDIS_URL: redis://redis:6379/0
+    volumes: [banco-chamados:/dados, segredos:/segredos:ro]
+    healthcheck: *saude
+
+  notificacoes:
+    <<: *servico
+    build: { context: ., dockerfile: servicos/notificacoes/Dockerfile }
+    environment:
+      <<: *ambiente
+      REDIS_URL: redis://redis:6379/0
+    volumes: [banco-notificacoes:/dados, segredos:/segredos:ro]
+    healthcheck: *saude
+
+  assistente:
+    <<: *servico
+    build: { context: ., dockerfile: servicos/assistente/Dockerfile }
+    environment: *ambiente
+    volumes: [banco-assistente:/dados, segredos:/segredos:ro]
+    healthcheck: *saude
+
+  gateway:
+    <<: *seguranca
+    build: { context: ., dockerfile: servicos/gateway/Dockerfile }
+    ports:
+      - "127.0.0.1:8000:8000"                  # o ÚNICO ponto de entrada, só acessível pelo próprio computador
+    environment:
+      USUARIOS_URL: http://usuarios:8000
+      INVENTARIO_URL: http://inventario:8000
+      CHAMADOS_URL: http://chamados:8000
+      NOTIFICACOES_URL: http://notificacoes:8000
+      ASSISTENTE_URL: http://assistente:8000
+    networks: [borda, interna]
+    # O gateway sobe mesmo se algum serviço estiver fora: só as rotas dele respondem 503
+    depends_on: [usuarios, inventario, chamados, notificacoes, assistente]
+    healthcheck: *saude
+
+networks:
+  borda: {}
+  interna:
+    internal: true                             # sem saída para a internet e sem portas publicadas
 
 volumes:
-  dados:
+  segredos:
+  fila:
+  banco-usuarios:
+  banco-inventario:
+  banco-chamados:
+  banco-notificacoes:
+  banco-assistente:
